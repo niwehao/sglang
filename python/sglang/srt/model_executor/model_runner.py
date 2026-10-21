@@ -2549,6 +2549,9 @@ class ModelRunner:
         split_forward_count: int,
     ) -> ModelRunnerOutput:
         if maybe_rebalance_after_rank_fault(eplb_manager=self.eplb_manager):
+            if forward_batch.tbo_children is not None:
+                # Rebuild derived TBO splits when the eager batch is retried.
+                forward_batch.tbo_children = None
             output = self._forward_raw(
                 forward_batch,
                 pp_proxy_tensors,
