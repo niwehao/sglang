@@ -15,6 +15,13 @@ Run (8-GPU CUDA graph scale-up):
     CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m pytest \\
         test/manual/ep/test_elastic_scale.py::TestElasticScaleUp4To8CudaGraph \\
         -v -s
+
+External two-node Mooncake A2A: start the full-Graph primary on Node A with TP/DP 4,
+--moe-a2a-backend mooncake, and the same model/rendezvous. On Node B use local GPUs
+0-3, set SGLANG_TEST_EXTERNAL_URL and SGLANG_ELASTIC_SCALE_DIST_INIT, and run the
+same selector with SGLANG_ELASTIC_EXTRA_SERVER_ARGS='--moe-a2a-backend mooncake'.
+The test owns only the joiner it starts; the external URL is HTTP-only and the
+primary remains the operator's process.
 """
 
 import os
@@ -35,7 +42,10 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-TEST_MODEL = os.environ.get("NIXL_EP_TEST_MODEL", DEFAULT_MODEL_NAME_FOR_TEST_MLA)
+TEST_MODEL = os.environ.get(
+    "NIXL_EP_TEST_MODEL",
+    os.environ.get("SGLANG_EP_TEST_MODEL", DEFAULT_MODEL_NAME_FOR_TEST_MLA),
+)
 os.environ.setdefault("SGLANG_NIXL_EP_NUM_MAX_DISPATCH_TOKENS_PER_RANK", "1024")
 
 ib_devices = get_rdma_devices_args()
@@ -202,6 +212,11 @@ class _ElasticScaleUpEndToEndBase(CustomTestCase):
         cls.base_url = BASE_URL_A
         cls._joining_procs = []
         cls._joining_log_fhs = []
+        external_url = os.environ.get("SGLANG_TEST_EXTERNAL_URL")
+        if external_url:
+            cls.base_url = external_url.rstrip("/")
+            cls.process = None
+            return
 
         primary_args = _scale_up_common_args(
             DIST_INIT_ADDR,
@@ -270,12 +285,13 @@ class _ElasticScaleUpEndToEndBase(CustomTestCase):
         ]
         env = os.environ.copy()
         visible_devices = _visible_device_ids()
-        join_end = rank_offset + join_tp
+        device_offset = 0 if os.environ.get("SGLANG_TEST_EXTERNAL_URL") else rank_offset
+        join_end = device_offset + join_tp
         if join_end > len(visible_devices):
             raise RuntimeError(
                 f"Scale-up requires {join_end} visible GPUs, got {len(visible_devices)}"
             )
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(visible_devices[rank_offset:join_end])
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(visible_devices[device_offset:join_end])
         base_joining_log = os.environ.get(
             "SGLANG_ELASTIC_SCALE_JOINING_LOG",
             f"/tmp/elastic_scale_joining_nnodes{cls.JOIN_NNODES}_{int(time.time())}.log",
@@ -584,8 +600,9 @@ class TestElasticScaleUp4To5CudaGraph(_ElasticScaleUpEndToEndBase):
 
 
 @unittest.skipUnless(
-    _count_visible_gpus() >= MAX_EP_SIZE,
-    f"Full scale-up E2E needs {MAX_EP_SIZE} GPUs.",
+    _count_visible_gpus()
+    >= (LAUNCH_EP_SIZE if os.environ.get("SGLANG_TEST_EXTERNAL_URL") else MAX_EP_SIZE),
+    f"Full scale-up E2E needs {MAX_EP_SIZE} GPUs or an external primary.",
 )
 class TestElasticScaleUp4To8CudaGraph(_ElasticScaleUpEndToEndBase):
     """Scale from four to eight ranks and recapture decode CUDA graphs."""

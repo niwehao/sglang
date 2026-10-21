@@ -2480,6 +2480,12 @@ def init_distributed_environment(
         backend,
     )
     if not torch.distributed.is_initialized():
+        elastic_mooncake_a2a = False
+        if moe_a2a_backend == "mooncake":
+            from sglang.srt.runtime_context import get_exec
+
+            elastic_mooncake_a2a = get_exec().moe.elastic_ep_backend == "mooncake"
+
         global _MODEL_PARALLEL_GROUP_TIMEOUT
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -2493,6 +2499,33 @@ def init_distributed_environment(
         _MODEL_PARALLEL_GROUP_TIMEOUT = timeout
 
         if backend == "mooncake":
+            if elastic_mooncake_a2a:
+                moe = get_exec().moe
+                if moe.mooncake_ib_device is not None:
+                    from mooncake.pg import set_device_filter
+                    from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import (
+                        get_ib_devices_for_gpu,
+                    )
+
+                    filter_local_rank = local_rank
+                    if filter_local_rank == -1:
+                        filter_local_rank = (
+                            int(os.environ.get("LOCAL_RANK", "0"))
+                            if distributed_init_method == "env://"
+                            else rank
+                        )
+                    ib_devices = get_ib_devices_for_gpu(
+                        moe.mooncake_ib_device, filter_local_rank
+                    )
+                    if ib_devices is not None:
+                        device_filter = [
+                            device.strip()
+                            for device in ib_devices.split(",")
+                            if device.strip()
+                        ]
+                        if device_filter:
+                            set_device_filter(device_filter)
+
             from mooncake.pg import MooncakeBackendOptions
 
             use_max_ws = max_world_size and max_world_size > world_size
@@ -2518,8 +2551,8 @@ def init_distributed_environment(
             pg_options=pg_options,
         )
 
-        # Create a global TCPStore for coordination (used by NIXL)
-        if moe_a2a_backend == "nixl":
+        # Create a global TCPStore for NIXL and elastic Mooncake peer metadata.
+        if moe_a2a_backend == "nixl" or elastic_mooncake_a2a:
             _create_global_tcp_store(
                 rank,
                 world_size,
